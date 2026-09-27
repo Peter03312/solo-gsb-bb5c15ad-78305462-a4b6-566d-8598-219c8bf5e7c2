@@ -1136,3 +1136,95 @@ tr.instance-row.slot-neighbor-next td:first-child {
   outline: none;
   border-color: var(--accent);
 }
+
+/* ---------- 场地周转审计 ---------- */
+
+.turnover-setting-table th {
+  top: 70px;
+}
+
+.turnover-table th {
+  top: 122px;
+}
+
+tr.turnover-row {
+  cursor: pointer;
+}
+
+tr.turnover-row.short td {
+  box-shadow: inset 3px 0 0 var(--warn);
+}
+
+tr.turnover-row.conflict td {
+  box-shadow: inset 3px 0 0 var(--conflict);
+}
+
+.turnover-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 0 7px;
+  border-radius: 8px;
+  border: 1px solid var(--conflict);
+  color: var(--conflict);
+  white-space: nowrap;
+}
+
+.turnover-badge.short {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.turnover-member {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.4;
+}
+
+.turnover-member-name {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 210px;
+}
+
+.turnover-member-name:hover {
+  text-decoration: underline;
+}
+
+.turnover-member-name.first {
+  color: var(--rdate);
+}
+
+.turnover-member-name.second {
+  color: var(--override);
+}
+
+.turnover-arrow {
+  padding: 1px 0;
+  white-space: nowrap;
+}
+
+.turnover-overlap {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--conflict);
+  white-space: nowrap;
+}
+
+.turnover-gap {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.turnover-short {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--warn);
+  white-space: nowrap;
+  font-weight: 600;
+}

@@ -346,6 +346,90 @@ if (!container.textContent?.includes('LOCATION 冲突没有变化')) {
 }
 console.log('✓ 重置规则后冲突变化清空');
 
+// 11) 场地周转审计：默认 0/0 下列出会议室 A 的现有时间冲突；设置缓冲后出现周转不足；
+//     点击行切回生效表并定位双方源块；取消的实例不参与
+const toTab = byText('.tabs button', '场地周转') as HTMLElement;
+if (!toTab) throw new Error('场地周转 页签未渲染');
+await act(async () => {
+  toTab.click();
+});
+// 默认设置下示例含会议室 A 的时间冲突（站会 09:00–09:30 与架构评审 09:15–10:00 等）
+const turnoverRows = (): NodeListOf<Element> => container.querySelectorAll('.turnover-row');
+if (turnoverRows().length === 0) throw new Error('默认缓冲下应列出现有时间冲突');
+if (![...turnoverRows()].some((r) => r.textContent?.includes('现有时间冲突'))) {
+  throw new Error('应标注「现有时间冲突」行');
+}
+if ([...turnoverRows()].some((r) => r.querySelector('.turnover-badge.short'))) {
+  throw new Error('默认 0/0 缓冲不应有周转不足行');
+}
+console.log(`✓ 场地周转默认列出 ${turnoverRows().length} 对现有时间冲突`);
+
+// 类型筛选：现有时间冲突
+const conflictChip = byText('button.chip', '现有时间冲突') as HTMLButtonElement;
+if (!conflictChip) throw new Error('找不到「现有时间冲突」筛选钮');
+await act(async () => conflictChip.click());
+const shownConflicts = turnoverRows().length;
+await act(async () => (byText('button.chip', '全部') as HTMLElement).click());
+if (shownConflicts === 0) throw new Error('筛选后应仍有冲突行');
+
+// 全部地点视图下存在每地点设置表；把会议室 A 的布场与清场都设为 240 分钟，
+// 站会相邻实例（跨日但 24h 内……）——示例冲突对本身相接，大缓冲下出现周转不足
+const settingRows = (): Element[] => [
+  ...container.querySelectorAll('.turnover-setting-table tbody tr'),
+];
+if (settingRows().length === 0) throw new Error('全部地点视图应显示每地点布场/清场设置表');
+const roomASetting = settingRows().find((r) => r.textContent?.includes('会议室 A'));
+if (!roomASetting) throw new Error('设置表应包含会议室 A');
+const minuteInputs = () =>
+  [...roomASetting.querySelectorAll('.keep-weight-input')] as HTMLInputElement[];
+const setNumber = (el: HTMLInputElement, v: string): void => {
+  const setter = Object.getOwnPropertyDescriptor(
+    (dom.window as any).HTMLInputElement.prototype,
+    'value'
+  )!.set!;
+  setter.call(el, v);
+  el.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+};
+await act(async () => setNumber(minuteInputs()[0], '240')); // 前布场
+await act(async () => setNumber(minuteInputs()[1], '240')); // 后清场
+await act(async () => {});
+if (![...turnoverRows()].some((r) => r.querySelector('.turnover-badge.short'))) {
+  throw new Error('大布场 / 清场缓冲后应出现周转不足行');
+}
+const shortRows = (): Element[] =>
+  [...turnoverRows()].filter((r) => r.classList.contains('short'));
+if (shortRows().length === 0) throw new Error('应有 .short 周转不足行');
+console.log(`✓ 设置布场 / 清场 240 分钟后出现 ${shortRows().length} 对周转不足（即时重算）`);
+
+// 越界输入截断到 240（操作布场输入框）
+const setupInput = minuteInputs()[0];
+await act(async () => setNumber(setupInput, '999'));
+await act(async () => {
+  setupInput.dispatchEvent(new dom.window.Event('focusout', { bubbles: true }));
+});
+if (setupInput.value !== '240') throw new Error(`超过 240 应截断回显 240，实际 ${setupInput.value}`);
+console.log('✓ 布场分钟越界截断为 240');
+
+// 只看周转不足筛选
+const shortChip = byText('button.chip', '周转不足') as HTMLButtonElement;
+await act(async () => shortChip.click());
+const onlyShort = turnoverRows();
+if ([...onlyShort].some((r) => !r.classList.contains('short'))) {
+  throw new Error('筛选后应只剩周转不足行');
+}
+await act(async () => (byText('button.chip', '全部') as HTMLElement).click());
+
+// 点击周转不足行：切回生效表、选中早一侧、另一方源块红框
+const firstShort = shortRows()[0] as HTMLElement;
+await act(async () => firstShort.click());
+const visibleTabTo = byText('.tabs button', '生效实例') as HTMLElement;
+if (!visibleTabTo.classList.contains('active')) throw new Error('点击审计对应切回生效实例页签');
+if (!container.querySelector('tr.instance-row.selected')) throw new Error('点击审计对应选中实例行');
+if (!container.querySelector('.source-line.conflict-line')) {
+  throw new Error('点击审计对应红框高亮另一方 ICS 源块');
+}
+console.log('✓ 点击周转审计对定位双方 ICS 源块');
+
 root.unmount();
 console.log('✓ DOM 集成验证全部通过');
 // jsdom 的定时器会让事件循环保持存活，显式退出

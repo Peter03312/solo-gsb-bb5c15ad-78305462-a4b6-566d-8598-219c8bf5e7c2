@@ -5,13 +5,23 @@ import type { InstanceChange } from '../ical-engine/diff';
 import type { ConflictChange } from '../ical-engine/conflict-diff';
 import type { FreeSlot } from '../ical-engine/free-windows';
 import type { KeepSetting } from '../ical-engine/keep-plan';
+import type { TurnoverPair, TurnoverSetting } from '../ical-engine/turnover';
+import { computeTurnoverAudit } from '../ical-engine/turnover';
 import { formatWall, formatOffset } from '../utils/format';
 import { ChangeImpact } from './ChangeImpact';
 import { ConflictChanges } from './ConflictChanges';
 import { FreeWindows } from './FreeWindows';
 import { KeepPlan } from './KeepPlan';
-
-export type AuditTab = 'visible' | 'cancelled' | 'excluded' | 'impact' | 'conflicts' | 'free' | 'keep';
+import { TurnoverAudit } from './TurnoverAudit';
+export type AuditTab =
+  | 'visible'
+  | 'cancelled'
+  | 'excluded'
+  | 'free'
+  | 'keep'
+  | 'turnover'
+  | 'impact'
+  | 'conflicts';
 
 /** 点击空闲窗口后，在生效表定位空档前后相邻事件的标记 */
 export interface SlotMark {
@@ -50,6 +60,8 @@ interface InstanceTableProps {
   slotMark: SlotMark | null;
   onSelectSlot: (slot: FreeSlot, tzid: string) => void;
   onDismissSlotMark: () => void;
+  /** 场地周转审计：点击审计对定位双方 ICS 源块 */
+  onSelectTurnoverPair: (pair: TurnoverPair) => void;
 }
 
 const SOURCE_LABEL: Record<Instance['source'], string> = {
@@ -80,15 +92,24 @@ export function InstanceTable({
   slotMark,
   onSelectSlot,
   onDismissSlotMark,
+  onSelectTurnoverPair,
 }: InstanceTableProps) {
   const [locFilter, setLocFilter] = useState('');
   const [onlyConflicts, setOnlyConflicts] = useState(false);
   /** 冲突保留方案：LOCATION 与 权重/必留设置（按身份保留，页签切换不丢失） */
   const [keepLocation, setKeepLocation] = useState('');
   const [keepSettings, setKeepSettings] = useState<Record<string, KeepSetting>>({});
+  /** 场地周转：LOCATION -> 活动前布场 / 结束后清场分钟（按地点保留，页签切换不丢失） */
+  const [turnoverSettings, setTurnoverSettings] = useState<Record<string, TurnoverSetting>>({});
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   const conflicts = useMemo(() => detectConflicts(instances), [instances]);
+
+  // 场地周转审计：仅基于当前生效实例，停用例外 / 编辑规则 / 展开范围变化后即时重算
+  const turnoverPairs = useMemo(
+    () => computeTurnoverAudit(instances, turnoverSettings),
+    [instances, turnoverSettings]
+  );
 
   const rows = useMemo(() => {
     if (tab === 'visible') return instances;
@@ -98,7 +119,14 @@ export function InstanceTable({
   }, [tab, instances, cancelled, excluded]);
 
   const filteredRows = useMemo(() => {
-    if (tab === 'impact' || tab === 'conflicts' || tab === 'free' || tab === 'keep') return [];
+    if (
+      tab === 'impact' ||
+      tab === 'conflicts' ||
+      tab === 'free' ||
+      tab === 'keep' ||
+      tab === 'turnover'
+    )
+      return [];
     const q = locFilter.trim().toLowerCase();
     return rows.filter((i) => {
       if (q && !i.location.toLowerCase().includes(q) && !i.summary.toLowerCase().includes(q)) {
@@ -160,6 +188,9 @@ export function InstanceTable({
         <button className={tab === 'keep' ? 'active' : ''} onClick={() => onTabChange('keep')}>
           冲突保留方案
         </button>
+        <button className={tab === 'turnover' ? 'active' : ''} onClick={() => onTabChange('turnover')}>
+          场地周转{turnoverPairs.length > 0 ? `（${turnoverPairs.length}）` : ''}
+        </button>
         <button className={tab === 'impact' ? 'active' : ''} onClick={() => onTabChange('impact')}>
           变更影响{changes.length > 0 ? `（${changes.length}）` : ''}
         </button>
@@ -204,6 +235,19 @@ export function InstanceTable({
           onSettingsChange={setKeepSettings}
           selectedKey={selectedKey}
           onSelectInstance={onSelect}
+        />
+      ) : tab === 'turnover' ? (
+        <TurnoverAudit
+          instances={instances}
+          pairs={turnoverPairs}
+          settings={turnoverSettings}
+          onSettingsChange={setTurnoverSettings}
+          selectedIdentity={selectedIdentity}
+          onSelectPair={onSelectTurnoverPair}
+          onSelectInstance={(inst) => {
+            onTabChange('visible');
+            onSelect(inst);
+          }}
         />
       ) : (
         <>

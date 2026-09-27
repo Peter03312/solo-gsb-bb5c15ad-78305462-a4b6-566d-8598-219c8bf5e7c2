@@ -6,6 +6,7 @@ import { diffInstances, instanceIdentity } from './ical-engine/diff';
 import type { InstanceChange } from './ical-engine/diff';
 import { diffConflictPairs } from './ical-engine/conflict-diff';
 import type { ConflictChange } from './ical-engine/conflict-diff';
+import type { TurnoverPair } from './ical-engine/turnover';
 import { normalizeCalendar } from './ical-engine/normalizer';
 import { SAMPLE_ICS } from './ical-engine/samples';
 import type {
@@ -236,6 +237,28 @@ export default function App() {
     },
     [expansion]
   );
+
+  // 点击场地周转审计对：切回生效表，选中时间更早一侧，另一方 ICS 源块红框高亮
+  const selectTurnoverPair = useCallback((pair: TurnoverPair) => {
+    const primary = pair.first;
+    const secondary = pair.second;
+    setGhostInstance(null);
+    setSlotMark(null);
+    setRightTab('visible');
+    setSelection({
+      instanceKey: instanceId(primary),
+      seriesId: primary.seriesId,
+      overrideId: primary.override?.id ?? primary.rangeOverride?.id ?? null,
+      conflictRanges: [
+        {
+          start: secondary.overrideRange?.start ?? secondary.masterRange.start,
+          end: secondary.overrideRange?.end ?? secondary.masterRange.end,
+          kind: 'conflict' as const,
+        },
+      ],
+      token: `turnover-${pair.pairKey}-${pair.kind}`,
+    });
+  }, []);
 
   // 点击空闲窗口：切到生效表，高亮并定位前邻（优先）/后邻
   const selectFreeSlot = useCallback((slot: FreeSlot, tzid: string) => {
@@ -562,6 +585,7 @@ export default function App() {
               slotMark={slotMark}
               onSelectSlot={selectFreeSlot}
               onDismissSlotMark={() => setSlotMark(null)}
+              onSelectTurnoverPair={selectTurnoverPair}
             />
           ) : (
             <div className="empty-hint">

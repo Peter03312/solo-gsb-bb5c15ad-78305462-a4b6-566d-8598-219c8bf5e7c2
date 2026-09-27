@@ -8,6 +8,11 @@ import { collectConflictPairs, diffConflictPairs } from '../src/ical-engine/conf
 import { normalizeCalendar } from '../src/ical-engine/normalizer';
 import { collectLocations, computeFreeWindows } from '../src/ical-engine/free-windows';
 import { computeKeepPlan } from '../src/ical-engine/keep-plan';
+import {
+  computeTurnoverAudit,
+  sanitizeTurnoverMinutes,
+  MAX_TURNOVER_MINUTES,
+} from '../src/ical-engine/turnover';
 import { dayLengthSec, dayStartUtcSec, wallToUtcSec } from '../src/utils/localtime';
 
 const ICS = `BEGIN:VCALENDAR
@@ -1567,6 +1572,376 @@ END:VCALENDAR
     assert.strictEqual(ch5[0].identityB, `cd-b@x#${kb7}`, 'removed pair B 3/7');
     assert.strictEqual(ch5[0].beforeOverlapSec, 1800, 'removed pair had 30m overlap');
     assert.ok(ch5[0].beforeA && ch5[0].beforeB && !ch5[0].afterA, 'removed pair keeps baseline sides only');
+  }
+}
+
+// ================= 场地周转审计（布场 / 清场缓冲，UTC 绝对时间半开区间） =================
+// 时间线（UTC，Room-T，2026-03-05）：
+//   t1 09:00–10:00  t2 10:30–11:00（间隔 30 分钟，布 30 清 0 时相切仍够，布 31 不足）
+//   t3 11:00–11:30  t4 11:30–12:00（t3/t4 首尾相接，间隔 0）
+//   t5 12:00–13:00（与 t4 首尾相接）；t6 13:30–14:00（间隔 30 分钟）
+// Room-C：c1 18:00–19:00 → c2 2026-03-06 01:00–02:00Z（绝对间隔 6h，跨午夜）
+// Room-D（纽约墙钟，2026-03-08 春季跳表 02:00→03:00）：
+//   d1 00:30–01:30 EST（05:30–06:30Z），d2 03:30–04:30 EDT（07:30–08:30Z）
+//   墙钟间隔 2h，但跳表那一小时不存在 → 绝对间隔 1h：清 60 布 0 相切够，清 61 不足
+// Room-X：零时长实例不参与；Room-NO：单实例不成对；Room-R：规则 HOURLY COUNT=3（r1/r2/r3）
+//   r1 15:00–16:00 r2 16:00–17:00 r3 17:00–18:00（相邻首尾相接）；r3 被 CANCELLED 例外取消
+const TO_ICS = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Test-Turnover//
+BEGIN:VTIMEZONE
+TZID:America/New_York
+BEGIN:DAYLIGHT
+TZOFFSETFROM:-0500
+TZOFFSETTO:-0400
+TZNAME:EDT
+DTSTART:19700308T020000
+RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU
+END:DAYLIGHT
+BEGIN:STANDARD
+TZOFFSETFROM:-0400
+TZOFFSETTO:-0500
+TZNAME:EST
+DTSTART:19701101T020000
+RRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU
+END:STANDARD
+END:VTIMEZONE
+BEGIN:VEVENT
+UID:to-t1@x
+SUMMARY:T1
+LOCATION:Room-T
+DTSTART:20260305T090000Z
+DTEND:20260305T100000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-t2@x
+SUMMARY:T2
+LOCATION:Room-T
+DTSTART:20260305T103000Z
+DTEND:20260305T110000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-t3@x
+SUMMARY:T3
+LOCATION:Room-T
+DTSTART:20260305T110000Z
+DTEND:20260305T113000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-t4@x
+SUMMARY:T4
+LOCATION:Room-T
+DTSTART:20260305T113000Z
+DTEND:20260305T120000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-t5@x
+SUMMARY:T5
+LOCATION:Room-T
+DTSTART:20260305T120000Z
+DTEND:20260305T130000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-t6@x
+SUMMARY:T6
+LOCATION:Room-T
+DTSTART:20260305T133000Z
+DTEND:20260305T140000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-c1@x
+SUMMARY:C1 evening
+LOCATION:Room-C
+DTSTART:20260305T180000Z
+DTEND:20260305T190000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-c2@x
+SUMMARY:C2 after midnight
+LOCATION:Room-C
+DTSTART:20260306T010000Z
+DTEND:20260306T020000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-d1@x
+SUMMARY:D1 before spring-forward
+LOCATION:Room-D
+DTSTART;TZID=America/New_York:20260308T003000
+DTEND;TZID=America/New_York:20260308T013000
+END:VEVENT
+BEGIN:VEVENT
+UID:to-d2@x
+SUMMARY:D2 after spring-forward
+LOCATION:Room-D
+DTSTART;TZID=America/New_York:20260308T033000
+DTEND;TZID=America/New_York:20260308T043000
+END:VEVENT
+BEGIN:VEVENT
+UID:to-x1@x
+SUMMARY:X1
+LOCATION:Room-X
+DTSTART:20260305T080000Z
+DTEND:20260305T090000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-xzero@x
+SUMMARY:X zero duration
+LOCATION:Room-X
+DTSTART:20260305T083000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-only@x
+SUMMARY:Only one
+LOCATION:Room-NO
+DTSTART:20260305T080000Z
+DTEND:20260305T090000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-r@x
+SUMMARY:Recurring
+LOCATION:Room-R
+DTSTART:20260305T150000Z
+DTEND:20260305T160000Z
+RRULE:FREQ=HOURLY;COUNT=3
+END:VEVENT
+BEGIN:VEVENT
+UID:to-r@x
+STATUS:CANCELLED
+DTSTART:20260305T170000Z
+DTEND:20260305T180000Z
+RECURRENCE-ID:20260305T170000Z
+END:VEVENT
+END:VCALENDAR
+`;
+{
+  const toParsed = parseCalendar(TO_ICS);
+  assert.ok(!('fatal' in toParsed), 'turnover sample parses');
+  if (!('fatal' in toParsed)) {
+    const toRange = { startUtc: Date.UTC(2026, 2, 1) / 1000, endUtc: Date.UTC(2026, 3, 10) / 1000 };
+    const toExp = expandAll(toParsed.masters, toRange, {
+      disabledOverrides: new Set(),
+      editedRrule: {},
+    });
+
+    // T0) 默认 0/0：只有原始相交的时间冲突；Room-T 全部相切 / 有空隙，无冲突
+    const t0 = computeTurnoverAudit(toExp.instances, {});
+    assert.strictEqual(t0.length, 0, 'default 0/0: no conflict (all abut or apart) and no shortage');
+
+    // 分钟清洗：0～240 整数，越界截断、负数回退 0、小数取整、非法回退 0
+    assert.strictEqual(sanitizeTurnoverMinutes(30), 30);
+    assert.strictEqual(sanitizeTurnoverMinutes(0), 0);
+    assert.strictEqual(sanitizeTurnoverMinutes(300), MAX_TURNOVER_MINUTES, 'clamp to 240');
+    assert.strictEqual(sanitizeTurnoverMinutes(-5), 0, 'negative -> 0');
+    assert.strictEqual(sanitizeTurnoverMinutes(12.9), 12, 'fraction floored');
+    assert.strictEqual(sanitizeTurnoverMinutes('x'), 0, 'invalid -> 0');
+    assert.strictEqual(sanitizeTurnoverMinutes(undefined), 0);
+
+    const setup = (loc: string, m: number) => ({ [loc]: { setupMin: m, teardownMin: 0 } });
+    const teardown = (loc: string, m: number) => ({ [loc]: { setupMin: 0, teardownMin: m } });
+
+    // T1) 仅布场 30 分钟：t1→t2 与 t5→t6 间隔正好 30，半开相切不算相交 → 充足；
+    //     t2→t3、t3→t4、t4→t5 首尾相接（间隔 0）→ 各缺 30 分钟
+    const t1 = computeTurnoverAudit(toExp.instances, setup('Room-T', 30));
+    const t1short = t1.filter((p) => p.kind === 'short');
+    assert.deepStrictEqual(
+      t1short.map((p) => `${p.first.summary}->${p.second.summary}`),
+      ['T2->T3', 'T3->T4', 'T4->T5'],
+      'abutting pairs short; 30-min gaps touch exactly and are enough (half-open)'
+    );
+    assert.ok(
+      !t1.some((p) => p.first.summary === 'T1') && !t1.some((p) => p.first.summary === 'T5'),
+      'pairs with 30 min gap not listed when required <= 30'
+    );
+
+    // T2) 布场 31：间隔 < 31 的全部相邻对不足；t1→t2 间隔 30 缺 1，间隔 0 的对缺 31
+    const t2 = computeTurnoverAudit(toExp.instances, setup('Room-T', 31));
+    const p12 = t2.find((p) => p.first.summary === 'T1' && p.second.summary === 'T2')!;
+    assert.ok(p12 && p12.kind === 'short', 't1->t2 short with 31 min setup');
+    assert.strictEqual(p12.gapSec, 1800, 'gap 30 min');
+    assert.strictEqual(p12.requiredSec, 31 * 60, 'required = setup only');
+    assert.strictEqual(p12.shortfallSec, 60, 'short by 1 min');
+    const p56at31 = t2.find((p) => p.first.summary === 'T5' && p.second.summary === 'T6')!;
+    assert.strictEqual(p56at31.shortfallSec, 60, 't5->t6 also 1 min short');
+    // t1→t5（间隔 120）、t2→t5（90）、t2→t6（150）等间隔 >= 31 的对不列出
+    assert.strictEqual(
+      t2.find((p) => p.first.summary === 'T1' && p.second.summary === 'T5'),
+      undefined,
+      't1->t5 gap 120 >= 31: not short'
+    );
+
+    // T3) 仅清场 30：间隔 0 的三对（t2→t3、t3→t4、t4→t5）不足各缺 30；
+    //     间隔 30 的对（t1→t2、t5→t6）半开相切即够 —— 清场只加在前一实例之后
+    const t3 = computeTurnoverAudit(toExp.instances, teardown('Room-T', 30));
+    const t3short = t3.filter((p) => p.kind === 'short');
+    assert.deepStrictEqual(
+      t3short.map((p) => `${p.first.summary}->${p.second.summary}`),
+      ['T2->T3', 'T3->T4', 'T4->T5'],
+      'only gap-0 pairs short: teardown 30 attaches to the first instance only'
+    );
+    assert.ok(t3short.every((p) => p.gapSec === 0 && p.shortfallSec === 1800), 'gap 0, short 30 min');
+    assert.strictEqual(
+      t3.find((p) => p.first.summary === 'T2' && p.second.summary === 'T4'),
+      undefined,
+      't2->t4 gap 30 meets 30 teardown (half-open touching is enough)'
+    );
+
+    // T4) 布场 120 清场 120（上限内）：t5→t6 间隔 30、所需 240 → 缺 210
+    const t4 = computeTurnoverAudit(toExp.instances, {
+      'Room-T': { setupMin: 120, teardownMin: 120 },
+    });
+    const p56 = t4.find((p) => p.first.summary === 'T5' && p.second.summary === 'T6')!;
+    assert.ok(p56 && p56.kind === 'short', 'T5->T6 short');
+    assert.strictEqual(p56.requiredSec, 240 * 60);
+    assert.strictEqual(p56.shortfallSec, 210 * 60, 'shortfall 240-30 = 210 min');
+
+    // T5) 列表按起点（绝对时间）排序
+    for (let i = 1; i < t4.length; i++) {
+      assert.ok(t4[i].first.startUtc >= t4[i - 1].first.startUtc, 'turnover pairs sorted by first start');
+    }
+
+    // T6) 制造真实时间冲突：为单次事件 t2 增加同 UID 覆盖例外（RECURRENCE-ID=其起点），
+    //     把 10:30–11:00 改到 10:45–11:15（与 t3 11:00 重叠）
+    //     ——冲突恒列出且与缓冲无关；冲突行 gapSec 为负、overlapSec 为正、缺口为 0
+    const CONFLICT_ICS = TO_ICS.replace(
+      'BEGIN:VEVENT\nUID:to-t2@x\nSUMMARY:T2',
+      `BEGIN:VEVENT
+UID:to-t2@x
+SUMMARY:T2 longer
+DTSTART:20260305T104500Z
+DTEND:20260305T111500Z
+RECURRENCE-ID:20260305T103000Z
+END:VEVENT
+BEGIN:VEVENT
+UID:to-t2@x
+SUMMARY:T2`
+    );
+    const cfParsed = parseCalendar(CONFLICT_ICS);
+    assert.ok(!('fatal' in cfParsed), 'conflict override sample parses');
+    if (!('fatal' in cfParsed)) {
+      const cfExp = expandAll(cfParsed.masters, toRange, {
+        disabledOverrides: new Set(),
+        editedRrule: {},
+      });
+      // 0/0 设置下冲突仍恒列出
+      const cf0 = computeTurnoverAudit(cfExp.instances, {});
+      const cfPair = cf0.find(
+        (p) => p.first.uid === 'to-t2@x' && p.second.uid === 'to-t3@x'
+      )!;
+      assert.ok(cfPair, 'overlapping pair always listed even with 0/0 buffers');
+      assert.strictEqual(cfPair.kind, 'conflict');
+      assert.strictEqual(cfPair.overlapSec, 900, 'overlap 15 min');
+      assert.strictEqual(cfPair.gapSec, -900, 'negative gap = -overlap');
+      assert.strictEqual(cfPair.shortfallSec, 0, 'conflict has no shortfall number');
+      // 冲突同时也是“缓冲相交”，但只标为冲突，不重复标周转不足
+      assert.strictEqual(
+        cf0.filter((p) => p.first.uid === 'to-t2@x' && p.second.uid === 'to-t3@x').length,
+        1,
+        'pair classified once (conflict wins over short)'
+      );
+      // 原 t1→t2 间隔变为 45 分钟（10:00→10:45），布场 30 仍够，布场 60 不足
+      const cf60 = computeTurnoverAudit(cfExp.instances, setup('Room-T', 60));
+      const p12 = cf60.find((p) => p.first.uid === 'to-t1@x' && p.second.uid === 'to-t2@x')!;
+      assert.strictEqual(p12.kind, 'short');
+      assert.strictEqual(p12.gapSec, 45 * 60);
+      assert.strictEqual(p12.shortfallSec, 15 * 60, '60-45 = 15 min short');
+      // t2 与 t4（11:30 起）：11:15 结束、间隔 15，布 0/清 0 不交；清场 30 不足
+      const cfTd30 = computeTurnoverAudit(cfExp.instances, teardown('Room-T', 30));
+      const p24 = cfTd30.find((p) => p.first.uid === 'to-t2@x' && p.second.uid === 'to-t4@x')!;
+      assert.strictEqual(p24.kind, 'short');
+      assert.strictEqual(p24.shortfallSec, 15 * 60, 'teardown 30 - gap 15 = 15');
+    }
+
+    // T7) 跨午夜：绝对间隔 6 小时（19:00Z→次日 01:00Z），按 UTC 计算而非本地日期切断。
+    //     所需周转 = 前清场 + 后布场（各 0～240）：清 240 + 布 120 = 360 相切够，
+    //     清 240 + 布 121 = 361 缺 1 分钟
+    assert.strictEqual(
+      computeTurnoverAudit(toExp.instances, { 'Room-C': { setupMin: 120, teardownMin: 240 } }).filter(
+        (p) => p.location === 'Room-C'
+      ).length,
+      0,
+      'overnight pair: 6h absolute gap meets 240 teardown + 120 setup (exactly touching)'
+    );
+    const cShort = computeTurnoverAudit(toExp.instances, {
+      'Room-C': { setupMin: 121, teardownMin: 240 },
+    }).filter((p) => p.location === 'Room-C');
+    assert.strictEqual(cShort.length, 1, 'overnight pair short by 1 min (240 teardown + 121 setup)');
+    assert.strictEqual(cShort[0].gapSec, 6 * 3600, 'gap measured across midnight in absolute time');
+    assert.strictEqual(cShort[0].shortfallSec, 60);
+
+    // T8) 跨 DST（纽约 3/8 春季跳表）：墙钟 01:30→03:30 看似 2 小时，实际只有 1 小时间隔。
+    //     清 60 + 布 0 相切够，清 60 + 布 1 不足 —— 证明按绝对时间而非墙钟差计算
+    assert.strictEqual(
+      computeTurnoverAudit(toExp.instances, { 'Room-D': { setupMin: 0, teardownMin: 60 } }).filter(
+        (p) => p.location === 'Room-D'
+      ).length,
+      0,
+      'spring-forward: absolute gap 1h meets 60 min teardown (wall gap would be 2h)'
+    );
+    const dShort = computeTurnoverAudit(toExp.instances, {
+      'Room-D': { setupMin: 1, teardownMin: 60 },
+    }).filter((p) => p.location === 'Room-D');
+    assert.strictEqual(dShort.length, 1, 'spring-forward pair short when 61 min required');
+    assert.strictEqual(dShort[0].gapSec, 3600, 'absolute gap 1h despite 2h wall-clock span');
+    assert.strictEqual(dShort[0].first.utcOffsetSec, -5 * 3600, 'first side EST');
+    assert.strictEqual(dShort[0].second.utcOffsetSec, -4 * 3600, 'second side EDT');
+
+    // T9) 零时长 / 单实例 / 已取消不参与；不同地点互不比较
+    const tAll = computeTurnoverAudit(toExp.instances, {
+      'Room-T': { setupMin: 240, teardownMin: 240 },
+      'Room-X': { setupMin: 240, teardownMin: 240 },
+      'Room-NO': { setupMin: 240, teardownMin: 240 },
+      'Room-R': { setupMin: 240, teardownMin: 240 },
+    });
+    assert.ok(
+      !tAll.some((p) => p.first.uid === 'to-xzero@x' || p.second.uid === 'to-xzero@x'),
+      'zero-duration instance excluded'
+    );
+    assert.ok(!tAll.some((p) => p.location === 'Room-NO'), 'single-instance location yields no pair');
+    assert.ok(
+      !tAll.some((p) => p.first.uid.startsWith('to-r@x') && p.first.startUtc === Date.UTC(2026, 2, 5, 17) / 1000),
+      'cancelled occurrence excluded'
+    );
+    // Room-R 的 r1/r2（3/5 15:00、16:00）首尾相接，大缓冲下有 1 对周转不足；r3 已取消
+    const rPairs = tAll.filter((p) => p.location === 'Room-R');
+    assert.strictEqual(rPairs.length, 1, 'r1->r2 abutting pair short; r3 cancelled');
+
+    // T10) 停用取消例外：r3 恢复，新增 r2→r3（以及跨一位的 r1→r3）对（即时重算）
+    const rMaster = toParsed.masters.find((m) => m.uid === 'to-r@x')!;
+    const rCancel = rMaster.overrides.find((o) => o.cancelled)!;
+    const toRestored = expandAll(toParsed.masters, toRange, {
+      disabledOverrides: new Set([rCancel.id]),
+      editedRrule: {},
+    });
+    const tRestored = computeTurnoverAudit(toRestored.instances, {
+      'Room-R': { setupMin: 240, teardownMin: 240 },
+    }).filter((p) => p.location === 'Room-R');
+    // r1/r2/r3 三点（15/16/17 时）：r1→r2、r2→r3 间隔 0，r1→r3 间隔 1 小时也 < 480 分钟缓冲
+    assert.strictEqual(tRestored.length, 3, 'restored r3: all three pairs within 8h buffer are short');
+    assert.ok(
+      tRestored.some(
+        (p) =>
+          p.first.startUtc === Date.UTC(2026, 2, 5, 16) / 1000 &&
+          p.second.startUtc === Date.UTC(2026, 2, 5, 17) / 1000
+      ),
+      'new r2->r3 pair appears after cancelled occurrence restored'
+    );
+
+    // T11) 编辑规则 COUNT=1：只剩 r1，无对（即时重算）
+    const toShortRule = expandAll(toParsed.masters, toRange, {
+      disabledOverrides: new Set(),
+      editedRrule: { 'to-r@x': 'FREQ=HOURLY;COUNT=1' },
+    });
+    const tShortRule = computeTurnoverAudit(toShortRule.instances, {
+      'Room-R': { setupMin: 240, teardownMin: 240 },
+    });
+    assert.strictEqual(tShortRule.length, 0, 'shortened rule removes Room-R pairs');
+
+    // T12) pairKey 为 LOCATION + 无序身份对（身份字典序固定）
+    const tKey = computeTurnoverAudit(toExp.instances, teardown('Room-T', 30));
+    assert.ok(
+      tKey.every((p) => p.identityA <= p.identityB && p.pairKey === `${p.location}|${p.identityA}|${p.identityB}`),
+      'pairKey uses ordered identity pair'
+    );
   }
 }
 
